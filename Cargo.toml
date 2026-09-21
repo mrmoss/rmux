@@ -1,0 +1,12 @@
+[package]
+name = "rmux"
+version = "1.0.0"
+edition = "2021"
+description = "Lightweight terminal multiplexer"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+portable-pty = "0.9"
+vt100 = "0.16"
