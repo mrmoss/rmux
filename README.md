@@ -1,4 +1,4 @@
-# mmux (Rust)
+# rmux (Rust)
 
 Rust port of the supplied Python `mmux` terminal multiplexer.
 
@@ -15,13 +15,24 @@ cargo build --release
 The binary is:
 
 ```text
-target/release/mmux
+target/release/rmux
+```
+
+Or:
+```bash
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+The binary is:
+
+```text
+target/x86_64-unknown-linux-musl/release/rmux
 ```
 
 ## Usage
 
 ```bash
-./target/release/mmux [options]
+./target/release/rmux [options]
 ```
 
 Options:
