@@ -78,7 +78,6 @@ impl Pane {
         let writer = pair.master.take_writer()?;
         let master = pair.master;
 
-        // Use a sync_channel to introduce backpressure and avoid unbounded OOM memory growth.
         let (tx, rx) = mpsc::sync_channel(PTY_CHANNEL_BOUND);
         thread::spawn(move || {
             let mut buf = [0u8; 1024];
@@ -129,7 +128,6 @@ impl Pane {
     fn feed_data(&mut self, data: &[u8]) {
         self.output.extend_from_slice(data);
         if self.output.len() > MAX_OUTPUT {
-            // Truncate to half of MAX_OUTPUT to prevent tight-loop re-parsing CPU spikes
             let target_len = MAX_OUTPUT / 2;
             let start = self.output.len() - target_len;
             self.output.drain(..start);
@@ -143,7 +141,7 @@ impl Pane {
 
     fn close(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait(); // Prevent zombie processes and reclaim PID table entry
+        let _ = self.child.wait();
         let _ = self.writer.flush();
     }
 
@@ -468,19 +466,59 @@ impl App {
         let alt=key.modifiers.contains(KeyModifiers::ALT);
         let shift=key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Char('v') if ctrl && !alt => { self.split(true); true }
-            KeyCode::Char('h') if ctrl && !alt => { self.split(false); true }
-            KeyCode::Char('b') if ctrl && !alt => { self.broadcast_mode = !self.broadcast_mode; self.full_redraw = true; true }
-            KeyCode::Char(' ') if ctrl => { self.toggle_maximize(); true }
-            KeyCode::Backspace | KeyCode::Delete => { if let Some(p)=self.panes.get_mut(self.active_index){p.write(b"\x7f");} true }
+            KeyCode::Char('v') if ctrl && !alt => {
+                if !self.broadcast_mode { self.split(true); }
+                true
+            }
+            KeyCode::Char('h') if ctrl && !alt => {
+                if !self.broadcast_mode { self.split(false); }
+                true
+            }
+            KeyCode::Char('b') if ctrl && !alt => {
+                self.broadcast_mode = !self.broadcast_mode;
+                if self.broadcast_mode && self.is_zoomed {
+                    self.is_zoomed = false;
+                    self.recalculate_layout();
+                }
+                self.full_redraw = true;
+                true
+            }
+            KeyCode::Char(' ') if ctrl => {
+                if !self.broadcast_mode { self.toggle_maximize(); }
+                true
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                if self.broadcast_mode {
+                    self.send_key(key);
+                } else if let Some(p)=self.panes.get_mut(self.active_index){
+                    p.write(b"\x7f");
+                }
+                true
+            }
             KeyCode::Up|KeyCode::Down|KeyCode::Left|KeyCode::Right => {
                 let d=match key.code {KeyCode::Up=>Direction::Up,KeyCode::Down=>Direction::Down,KeyCode::Left=>Direction::Left,_=>Direction::Right};
-                if ctrl && shift { self.resize_active(d); true }
-                else if alt && shift { self.swap_active(d); true }
-                else if ctrl { self.navigate(d); true }
+                if ctrl && shift {
+                    if !self.broadcast_mode { self.resize_active(d); }
+                    true
+                }
+                else if alt && shift {
+                    if !self.broadcast_mode { self.swap_active(d); }
+                    true
+                }
+                else if ctrl {
+                    if !self.broadcast_mode { self.navigate(d); }
+                    true
+                }
                 else { self.send_key(key); true }
             }
-            KeyCode::Esc => { if let Some(p)=self.panes.get_mut(self.active_index){p.write(b"\x1b");} true }
+            KeyCode::Esc => {
+                if self.broadcast_mode {
+                    self.send_key(key);
+                } else if let Some(p)=self.panes.get_mut(self.active_index){
+                    p.write(b"\x1b");
+                }
+                true
+            }
             _ => { self.send_key(key); true }
         }
     }
@@ -574,7 +612,6 @@ impl App {
         }
         if !self.no_instructions { self.draw_footer(&mut out)?; }
 
-        // Place the real hardware cursor at the active pane's cursor position
         if let Some(p)=self.panes.get(self.active_index) {
             let (cy,cx)=p.screen.screen().cursor_position();
             let x=p.x+1+cx as usize; let y=p.y+1+cy as usize;
@@ -624,7 +661,6 @@ impl App {
                 let sx = p.x + 1 + c as usize;
                 if sx >= p.x + p.width.saturating_sub(1) || sx >= self.screen_width { break; }
 
-                // If broadcast mode is active, simulate a cursor visual indicator on each pane's cursor cell
                 let is_simulated_cursor = self.broadcast_mode && r == cursor_r && c == cursor_c;
 
                 if let Some(cell) = screen.cell(r, c) {
@@ -688,7 +724,11 @@ impl App {
         } else {
             " [Ctrl+V]:Split V | [Ctrl+H]:Split H | [Ctrl+Space]:Maximize | [Ctrl+B]:Broadcast ".to_string()
         };
-        let m2=" [Ctrl+Shift+Arrows]:Resize | [Alt+Shift+Arrows]:Swap ".to_string();
+        let m2 = if self.broadcast_mode {
+            "".to_string()
+        } else {
+            " [Ctrl+Shift+Arrows]:Resize | [Alt+Shift+Arrows]:Swap ".to_string()
+        };
         if self.debug_mode { if let Some(k)=&self.last_key_code { let tag=format!("  [key:{}]",k); let avail=self.screen_width.saturating_sub(tag.chars().count()); m1=m1.chars().take(avail).collect(); m1.push_str(&" ".repeat(avail.saturating_sub(m1.chars().count()))); m1.push_str(&tag); } }
         let row1=self.screen_height.saturating_sub(2); let row2=self.screen_height.saturating_sub(1);
         queue!(out,SetAttribute(Attribute::Reverse),cursor::MoveTo(0,row1 as u16),Print(pad_to(&m1,self.screen_width)),cursor::MoveTo(0,row2 as u16),Print(pad_to(&m2,self.screen_width)),SetAttribute(Attribute::Reset))?;
