@@ -24,7 +24,7 @@ const MAX_OUTPUT: usize = 1_000_000;
 const PTY_CHANNEL_BOUND: usize = 256;
 
 #[derive(ClapParser, Debug)]
-#[command(name = "mmux", version = "mmux 1.0", disable_version_flag = true, about = "A lightweight terminal multiplexer.", after_help = "Keys:\n  Ctrl+V                Split vertical\n  Ctrl+H                Split horizontal\n  Ctrl+Space            Toggle zoom\n  Ctrl+Arrows           Navigate between panes\n  Ctrl+Shift+Arrows     Resize pane boundary\n  Alt+Shift+Arrows      Swap with adjacent pane")]
+#[command(name = "mmux", version = "mmux 1.0", disable_version_flag = true, about = "A lightweight terminal multiplexer.", after_help = "Keys:\n  Ctrl+V                Split vertical\n  Ctrl+H                Split horizontal\n  Ctrl+Space            Toggle zoom\n  Ctrl+B                Toggle broadcast mode\n  Ctrl+Arrows           Navigate between panes\n  Ctrl+Shift+Arrows     Resize pane boundary\n  Alt+Shift+Arrows      Swap with adjacent pane")]
 struct Args {
     #[arg(short = 's', long = "shell", default_value_t = default_shell())]
     shell: String,
@@ -187,6 +187,7 @@ struct App {
     root: Box<LayoutNode>,
     next_id: usize,
     is_zoomed: bool,
+    broadcast_mode: bool,
     last_key_code: Option<String>,
     screen_width: usize,
     screen_height: usize,
@@ -211,7 +212,7 @@ impl App {
             min_pane_height: args.min_height.max(2),
             panes: vec![pane], active_index: 0,
             root: LayoutNode::leaf(0), next_id: 1,
-            is_zoomed: false, last_key_code: None,
+            is_zoomed: false, broadcast_mode: false, last_key_code: None,
             screen_width: width, screen_height: height,
             full_redraw: true,
         })
@@ -469,6 +470,7 @@ impl App {
         match key.code {
             KeyCode::Char('v') if ctrl && !alt => { self.split(true); true }
             KeyCode::Char('h') if ctrl && !alt => { self.split(false); true }
+            KeyCode::Char('b') if ctrl && !alt => { self.broadcast_mode = !self.broadcast_mode; self.full_redraw = true; true }
             KeyCode::Char(' ') if ctrl => { self.toggle_maximize(); true }
             KeyCode::Backspace | KeyCode::Delete => { if let Some(p)=self.panes.get_mut(self.active_index){p.write(b"\x7f");} true }
             KeyCode::Up|KeyCode::Down|KeyCode::Left|KeyCode::Right => {
@@ -525,7 +527,17 @@ impl App {
                 _ => {}
             }
         }
-        if !bytes.is_empty() { if let Some(p)=self.panes.get_mut(self.active_index){p.write(&bytes);} }
+        if !bytes.is_empty() {
+            if self.broadcast_mode {
+                for p in &mut self.panes {
+                    p.write(&bytes);
+                }
+            } else {
+                if let Some(p) = self.panes.get_mut(self.active_index) {
+                    p.write(&bytes);
+                }
+            }
+        }
     }
 
     fn drain_output(&mut self) -> (bool, bool) {
@@ -562,6 +574,7 @@ impl App {
         }
         if !self.no_instructions { self.draw_footer(&mut out)?; }
 
+        // Place the real hardware cursor at the active pane's cursor position
         if let Some(p)=self.panes.get(self.active_index) {
             let (cy,cx)=p.screen.screen().cursor_position();
             let x=p.x+1+cx as usize; let y=p.y+1+cy as usize;
@@ -574,7 +587,7 @@ impl App {
     }
 
     fn draw_pane(&self,out:&mut io::Stdout,i:usize,bottom:usize)->Result<()> {
-        let p=&self.panes[i]; let active=i==self.active_index;
+        let p=&self.panes[i]; let active=i==self.active_index || self.broadcast_mode;
         let attr=if active{Attribute::Bold}else{Attribute::NormalIntensity};
         let border_fg=if active{CtColor::Yellow}else{CtColor::White};
         queue!(out,SetForegroundColor(border_fg),SetAttribute(attr))?;
@@ -591,6 +604,7 @@ impl App {
 
         let screen = p.screen.screen();
         let (rows, cols) = screen.size();
+        let (cursor_r, cursor_c) = screen.cursor_position();
 
         for r in 0..rows {
             let sy = p.y + 1 + r as usize;
@@ -610,12 +624,16 @@ impl App {
                 let sx = p.x + 1 + c as usize;
                 if sx >= p.x + p.width.saturating_sub(1) || sx >= self.screen_width { break; }
 
+                // If broadcast mode is active, simulate a cursor visual indicator on each pane's cursor cell
+                let is_simulated_cursor = self.broadcast_mode && r == cursor_r && c == cursor_c;
+
                 if let Some(cell) = screen.cell(r, c) {
                     let fg = to_ct_color(cell.fgcolor());
                     let bg = to_ct_color(cell.bgcolor());
+                    let rev = cell.inverse() || is_simulated_cursor;
 
                     let needs_reset = (prev_bold && !cell.bold()) || (prev_under && !cell.underline()) ||
-                                      (prev_rev && !cell.inverse()) || (prev_ital && !cell.italic()) ||
+                                      (prev_rev && !rev) || (prev_ital && !cell.italic()) ||
                                       (prev_dim && !cell.dim());
 
                     if needs_reset {
@@ -629,19 +647,25 @@ impl App {
 
                     if cell.bold() && !prev_bold { queue!(out, SetAttribute(Attribute::Bold))?; prev_bold = true; }
                     if cell.underline() && !prev_under { queue!(out, SetAttribute(Attribute::Underlined))?; prev_under = true; }
-                    if cell.inverse() && !prev_rev { queue!(out, SetAttribute(Attribute::Reverse))?; prev_rev = true; }
+                    if rev && !prev_rev { queue!(out, SetAttribute(Attribute::Reverse))?; prev_rev = true; }
+                    else if !rev && prev_rev { queue!(out, SetAttribute(Attribute::NoReverse))?; prev_rev = false; }
                     if cell.italic() && !prev_ital { queue!(out, SetAttribute(Attribute::Italic))?; prev_ital = true; }
                     if cell.dim() && !prev_dim { queue!(out, SetAttribute(Attribute::Dim))?; prev_dim = true; }
 
                     let ch = cell.contents();
                     if ch.is_empty() { queue!(out, Print(' '))?; } else { queue!(out, Print(ch))?; }
                 } else {
-                    if prev_fg != Some(CtColor::Reset) || prev_bg != Some(CtColor::Reset) || prev_bold || prev_under || prev_rev || prev_ital || prev_dim {
-                        queue!(out, SetAttribute(Attribute::Reset), SetForegroundColor(CtColor::Reset), SetBackgroundColor(CtColor::Reset))?;
-                        prev_fg = Some(CtColor::Reset); prev_bg = Some(CtColor::Reset);
-                        prev_bold = false; prev_under = false; prev_rev = false; prev_ital = false; prev_dim = false;
+                    if is_simulated_cursor {
+                        if !prev_rev { queue!(out, SetAttribute(Attribute::Reverse))?; prev_rev = true; }
+                        queue!(out, Print(' '))?;
+                    } else {
+                        if prev_fg != Some(CtColor::Reset) || prev_bg != Some(CtColor::Reset) || prev_bold || prev_under || prev_rev || prev_ital || prev_dim {
+                            queue!(out, SetAttribute(Attribute::Reset), SetForegroundColor(CtColor::Reset), SetBackgroundColor(CtColor::Reset))?;
+                            prev_fg = Some(CtColor::Reset); prev_bg = Some(CtColor::Reset);
+                            prev_bold = false; prev_under = false; prev_rev = false; prev_ital = false; prev_dim = false;
+                        }
+                        queue!(out, Print(' '))?;
                     }
-                    queue!(out, Print(' '))?;
                 }
             }
             queue!(out, SetAttribute(Attribute::Reset), SetForegroundColor(border_fg))?;
@@ -649,7 +673,8 @@ impl App {
 
         if active {
             let zoom=if self.is_zoomed{" [ ZOOMED ] "}else{""}; let pid=format!(" [ PID: {} ] ",p.pid);
-            let long=format!("{}{} [ ACTIVE ] ",zoom,pid); let short=format!("{}{} [*] ",zoom,pid);
+            let state_label = if self.broadcast_mode { " [ BROADCAST ] " } else { " [ ACTIVE ] " };
+            let long=format!("{}{}{}",zoom,pid,state_label); let short=format!("{}{}[*] ",zoom,pid);
             let title=if p.width>long.chars().count()+6{long}else{short};
             if p.width>=title.chars().count()+2 { let tx=p.x+(p.width-title.chars().count())/2; if p.x<tx && tx+title.chars().count()<p.x+p.width {queue!(out,cursor::MoveTo(tx as u16,p.y as u16),SetAttribute(Attribute::Reverse),Print(title),SetAttribute(Attribute::Reset))?;} }
         }
@@ -658,7 +683,11 @@ impl App {
     }
 
     fn draw_footer(&self,out:&mut io::Stdout)->Result<()> {
-        let mut m1=" [Ctrl+V]:Split V | [Ctrl+H]:Split H | [Ctrl+Space]:Maximize | [Ctrl+Arrows]:Move ".to_string();
+        let mut m1 = if self.broadcast_mode {
+            " [ BROADCAST MODE ACTIVE ] - [Ctrl+B]:Toggle Broadcast ".to_string()
+        } else {
+            " [Ctrl+V]:Split V | [Ctrl+H]:Split H | [Ctrl+Space]:Maximize | [Ctrl+B]:Broadcast ".to_string()
+        };
         let m2=" [Ctrl+Shift+Arrows]:Resize | [Alt+Shift+Arrows]:Swap ".to_string();
         if self.debug_mode { if let Some(k)=&self.last_key_code { let tag=format!("  [key:{}]",k); let avail=self.screen_width.saturating_sub(tag.chars().count()); m1=m1.chars().take(avail).collect(); m1.push_str(&" ".repeat(avail.saturating_sub(m1.chars().count()))); m1.push_str(&tag); } }
         let row1=self.screen_height.saturating_sub(2); let row2=self.screen_height.saturating_sub(1);
