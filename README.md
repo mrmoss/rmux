@@ -2,7 +2,7 @@
 
 Rust port of the supplied Python `mmux` terminal multiplexer.
 
-The port keeps the same core design: each pane owns a PTY, raw PTY output is retained as the source of truth, and the virtual terminal is rebuilt from that history when a pane changes dimensions or is swapped. The Python project documents the same architecture and keybindings. 
+The port keeps the same core design: each pane owns a PTY, raw PTY output is retained as the source of truth, and the virtual terminal is rebuilt from that history when a pane changes dimensions or is swapped. The Python project documents the same architecture and keybindings.
 
 ## Build
 
@@ -49,6 +49,7 @@ Keybindings:
 - `Ctrl+V` — split vertical
 - `Ctrl+H` — split horizontal
 - `Ctrl+Space` — toggle zoom
+- `Ctrl+B` - toggle broadcast mode
 - `Ctrl+Arrow` — navigate
 - `Ctrl+Shift+Arrow` — resize
 - `Alt+Shift+Arrow` — swap pane terminal state
