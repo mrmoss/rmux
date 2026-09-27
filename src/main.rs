@@ -24,7 +24,7 @@ const MAX_OUTPUT: usize = 1_000_000;
 const PTY_CHANNEL_BOUND: usize = 256;
 
 #[derive(ClapParser, Debug)]
-#[command(name = "mmux", version = "mmux 1.0", disable_version_flag = true, about = "A lightweight terminal multiplexer.", after_help = "Keys:\n  Ctrl+V                Split vertical\n  Ctrl+H                Split horizontal\n  Ctrl+Space            Toggle zoom\n  Ctrl+B                Toggle broadcast mode\n  Ctrl+Arrows           Navigate between panes\n  Ctrl+Shift+Arrows     Resize pane boundary\n  Alt+Shift+Arrows      Swap with adjacent pane")]
+#[command(name = "rmux", version = "2026.9.26.0", disable_version_flag = true, about = "A lightweight terminal multiplexer.", after_help = "Keys:\n  Ctrl+V                Split vertical\n  Ctrl+H                Split horizontal\n  Ctrl+Space            Toggle zoom\n  Ctrl+B                Toggle broadcast mode\n  Ctrl+Arrows           Navigate between panes\n  Ctrl+Shift+Arrows     Resize pane boundary\n  Alt+Shift+Arrows      Swap with adjacent pane")]
 struct Args {
     #[arg(short = 's', long = "shell", default_value_t = default_shell())]
     shell: String,
@@ -70,7 +70,13 @@ impl Pane {
         let cols = width.saturating_sub(2).max(1).min(u16::MAX as usize) as u16;
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+
         let mut cmd = CommandBuilder::new(command);
+
+        if let Ok(cwd) = env::current_dir() {
+            cmd.cwd(cwd);
+        }
+
         cmd.env("TERM", env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()));
         let child = pair.slave.spawn_command(cmd)?;
         let pid = child.process_id().unwrap_or(0) as u32;
@@ -771,6 +777,6 @@ fn to_ct_color(c: vt100::Color)->CtColor {
 
 fn main()->Result<()> {
     let args=Args::parse();
-    let mut app=App::new(args).context("failed to initialize mmux")?;
+    let mut app=App::new(args).context("failed to initialize rmux")?;
     let result=app.run(); app.cleanup(); result
 }
